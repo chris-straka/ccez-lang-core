@@ -1,0 +1,13 @@
+[package]
+name = "ccez-lexicon"
+version = "0.1.0"
+edition = "2024"
+description = "The word lookup's logic (forms to look up, Wiktionary entries, gender and article), no files or network; builds to WebAssembly for ccez-lang"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+serde_json = "1"

@@ -1,0 +1,42 @@
+[workspace]
+members = [".", "lexicon"]
+resolver = "3"
+
+[package]
+name = "ccez-lang-core"
+version = "0.1.0"
+edition = "2024"
+description = "The language-learning core shared by the owner's apps (ccez-keys, ccez-tube, ccez-lang): dictionaries, Japanese and Chinese words with their readings, word statuses synced with ccez-words, and the AI client and prompts"
+license = "MIT"
+repository = "https://github.com/chris-straka/ccez-lang-core"
+publish = false
+
+[features]
+default = ["net"]
+# Japanese words cut by lindera with IPAdic (loaded from files at run
+# time). Without it Japanese is cut on Unicode word breaks, no readings.
+ja = ["dep:lindera"]
+# Word-status sync with ccez-words and the AI client (HTTP).
+net = ["dep:reqwest"]
+# UniFFI derives on the records, for an app that hands them to Kotlin.
+uniffi = ["dep:uniffi"]
+
+[dependencies]
+flate2 = "1.1"
+lexicon = { package = "ccez-lexicon", path = "lexicon" }
+lindera = { version = "6.2.0", default-features = false, optional = true }
+# 0.12 with ring-backed rustls: cross-compiles to Android with no cmake.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"], optional = true }
+serde_json = "1"
+thiserror = "2"
+unicode-normalization = "0.1.26"
+unicode-segmentation = "1.13"
+uniffi = { version = "0.32", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"

@@ -1,0 +1,4 @@
+# A few CC-CEDICT lines (CC BY-SA 4.0, see CREDITS.md).
+我 我 [wo3] /I; me; my/
+喜歡 喜欢 [xi3 huan5] /to like; to be fond of/
+貓 猫 [mao1] /cat/
