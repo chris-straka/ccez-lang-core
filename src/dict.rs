@@ -12,7 +12,32 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::fs::FileExt;
+/// Reading at an offset without moving a shared cursor, on Unix and Windows.
+trait ReadAt {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()>;
+}
+
+impl ReadAt for std::fs::File {
+    #[cfg(unix)]
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        std::os::unix::fs::FileExt::read_exact_at(self, buf, offset)
+    }
+
+    #[cfg(windows)]
+    fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt;
+        while !buf.is_empty() {
+            match self.seek_read(buf, offset)? {
+                0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                n => {
+                    buf = &mut buf[n..];
+                    offset += n as u64;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
