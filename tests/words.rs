@@ -17,6 +17,7 @@ fn words() -> Words {
     let _ = std::fs::remove_dir_all(&root);
     let w = Words::new(&root);
     w.install("fr", &fixture("fr.tsv")).unwrap();
+    w.install("de", &fixture("de.tsv")).unwrap();
     w.install("zh", &fixture("cedict.txt")).unwrap();
     w.install("ja", &fixture("ja.tsv")).unwrap();
     w
@@ -90,4 +91,39 @@ fn furigana_and_pinyin_helpers() {
     assert_eq!(parts[1].rt, None);
     assert_eq!(to_hiragana("ネコ"), "ねこ");
     assert_eq!(numbered_to_marks("ni3 hao3"), "nǐ hǎo");
+}
+
+#[test]
+fn every_app_saves_a_word_under_its_headword() {
+    let w = words();
+    let h = |lang: &str, t: &str| w.headword(lang, t, None);
+    // Forms go to their word; a form that is a word of its own stays.
+    assert_eq!(h("fr", "freinent").as_deref(), Some("freiner"));
+    assert_eq!(h("fr", "gare").as_deref(), Some("gare"));
+    // Elision and a sentence's capital go; the dictionary's spelling stays.
+    assert_eq!(h("fr", "l'ardoise").as_deref(), Some("ardoise"));
+    assert_eq!(h("fr", "s’attardent").as_deref(), None, "a form the dictionary doesn't have");
+    assert_eq!(h("fr", "s'freinent").as_deref(), Some("s'freiner"), "a reflexive keeps its s'");
+    assert_eq!(h("fr-CA", "Maison").as_deref(), Some("maison"));
+    // A phrase: its first word's headword, then the rest.
+    assert_eq!(h("fr", "découlent  de").as_deref(), Some("découler de"));
+    // Nothing to save: numbers, names, fragments.
+    assert_eq!(h("fr", "2024"), None);
+    assert_eq!(h("fr", "Trump"), None);
+    assert_eq!(h("fr", "mais0n"), None);
+    assert_eq!(h("fr", "fre"), None);
+    // German nouns keep their capital, whoever lower-cased them; a verb
+    // spelled like a noun stays the verb.
+    assert_eq!(h("de", "wasser").as_deref(), Some("Wasser"));
+    assert_eq!(h("de", "urteil").as_deref(), Some("Urteil"));
+    assert_eq!(h("de", "spur").as_deref(), Some("Spur"));
+    assert_eq!(h("de", "fressen").as_deref(), Some("fressen"));
+    assert_eq!(h("de", "Fressen").as_deref(), Some("Fressen"));
+    // No dictionary for the language yet: as it is.
+    assert_eq!(h("sv", " hej ").as_deref(), Some("hej"));
+    // Japanese: the analyser's base form, as the apps pass it.
+    assert_eq!(w.headword("ja", "食べた", Some("食べる")).as_deref(), Some("食べる"));
+    assert_eq!(h("ja", "猫").as_deref(), Some("猫"));
+    // Chinese words don't change.
+    assert_eq!(h("zh", "喜欢").as_deref(), Some("喜欢"));
 }

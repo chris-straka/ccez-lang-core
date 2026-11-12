@@ -531,6 +531,62 @@ impl Words {
     /// [`Words::tokens`]), then the word as written, then de-inflected
     /// guesses. None when the language has no dictionary installed or
     /// the dictionary doesn't have the word.
+    /// The one form a word is saved under, the same in every app: its
+    /// dictionary headword in the dictionary's spelling ("freinent" →
+    /// "freiner", "l'ardoise" → "ardoise", "wasser" → "Wasser", 食べた →
+    /// 食べる with the analyser's `lemma`). A form that is a word of its own
+    /// stays itself ("gare", not "garer"); a phrase keeps the dictionary's
+    /// form, or its first word's headword and the rest ("découlent de" →
+    /// "découler de"). None: nothing to save — a number, a name, a fragment
+    /// the dictionary doesn't know. With no dictionary for the language yet,
+    /// the text as it is.
+    pub fn headword(&self, lang: &str, text: &str, lemma: Option<&str>) -> Option<String> {
+        let t = text.trim();
+        if t.is_empty() || t.chars().any(|c| c.is_numeric()) {
+            return None;
+        }
+        let base = base_lang(lang);
+        if self.pack(&base).is_none() {
+            return Some(t.to_string());
+        }
+        let own = |e: Entry| -> Option<String> {
+            if e.senses.iter().all(|s| s.pos == "proper noun") {
+                return None;
+            }
+            // CC-CEDICT names the traditional spelling beside the word: "喜欢 (喜歡)".
+            let w = e.lemma.unwrap_or(e.word);
+            Some(w.split(" (").next().unwrap_or(&w).to_string())
+        };
+        if t.contains(char::is_whitespace) {
+            if let Some(e) = self.lookup(lang, t, lemma) {
+                return own(e);
+            }
+            let (first, rest) = t.split_once(char::is_whitespace)?;
+            let head = self.headword(lang, first, None)?;
+            return Some(format!("{head} {}", rest.split_whitespace().collect::<Vec<_>>().join(" ")));
+        }
+        // A French reflexive verb keeps its "s'" ("s'attarder", not
+        // "attarder"; Italian's s' is "si" cut short, and goes).
+        if base == "fr" {
+            for refl in ["s'", "s’"] {
+                if let Some(rest) = t.strip_prefix(refl).filter(|r| !r.is_empty()) {
+                    return self.headword(lang, rest, None).map(|h| format!("s'{h}"));
+                }
+            }
+        }
+        // A German noun in lower case (some apps lower-case everything):
+        // the noun, unless the lower case is a word of its own ("fressen").
+        if base == "de" && t.chars().next().is_some_and(char::is_lowercase) {
+            let mut cs = t.chars();
+            let cap: String = cs.next().map(|c| c.to_uppercase().chain(cs).collect()).unwrap_or_default();
+            let noun = self.lookup(lang, &cap, None).filter(|n| n.word == cap && n.lemma.is_none() && n.senses.iter().any(|s| s.pos.starts_with("noun")));
+            if noun.is_some() && !self.lookup(lang, t, None).is_some_and(|e| e.word == t && e.lemma.is_none()) {
+                return Some(cap);
+            }
+        }
+        own(self.lookup(lang, t, lemma)?)
+    }
+
     pub fn lookup(&self, lang: &str, word: &str, lemma: Option<&str>) -> Option<Entry> {
         let base = base_lang(lang);
         let p = self.pack(&base)?;
