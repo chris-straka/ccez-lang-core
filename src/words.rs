@@ -302,14 +302,20 @@ impl Words {
         for cand in cands {
             let Some(ids) = p.get(&cand) else { continue };
             let ids: Vec<i64> = serde_json::from_str(&ids).unwrap_or_default();
-            let found: Vec<(i64, Value)> = ids
+            // A word written in kana looks at more of its spellings: the
+            // one meant is the everyday one, often not the first listed.
+            let kana_typed = is_kana(word);
+            let mut found: Vec<(i64, Value)> = ids
                 .into_iter()
-                .take(3)
+                .take(if kana_typed { 8 } else { 3 })
                 .filter_map(|id| {
                     let e = p.get(&format!("#{id}"))?;
                     Some((id, serde_json::from_str(&e).ok()?))
                 })
                 .collect();
+            if kana_typed {
+                kana_order(&mut found);
+            }
             if let Some(e) = ja_entry(&cand, &found) {
                 return Some(e);
             }
@@ -901,6 +907,17 @@ fn strings(v: Option<&Value>) -> Vec<String> {
 /// JMdict entries (`[kanji, kana, common, [[pos, glosses]…]]`) as one
 /// entry: the best one's senses, then a second's when it reads
 /// differently and is common (方: かた and ほう).
+/// A word written in kana: its common spellings first, the one with the
+/// most senses first among them (こと is 事, "thing", before 古都, "ancient
+/// city", listed first: owner, 2026-11-12). Everyday words written in kana
+/// (事, 物, 時, 所) have many senses; the rare kanji words sharing their
+/// sound have one or two. The order is otherwise the dictionary's.
+fn kana_order(found: &mut [(i64, Value)]) {
+    let common = |e: &Value| e.get(2).and_then(Value::as_i64).unwrap_or(0) != 0;
+    let senses = |e: &Value| e.get(3).and_then(Value::as_array).map_or(0, Vec::len);
+    found.sort_by(|a, b| common(&b.1).cmp(&common(&a.1)).then(senses(&b.1).cmp(&senses(&a.1))));
+}
+
 fn ja_entry(word: &str, found: &[(i64, Value)]) -> Option<Entry> {
     let (first_id, first) = found.first()?;
     let kana = |e: &Value| strings(e.get(1)).into_iter().next();
@@ -1086,6 +1103,18 @@ fn verb_form(entry: &Entry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_word_in_kana_is_its_everyday_spelling() {
+        // こと as JMdict lists it: 古都 first, then 事, 琴, a particle.
+        let e = |id: i64, word: &str, common: i64, senses: usize| -> (i64, Value) {
+            let s: Vec<Value> = (0..senses).map(|_| serde_json::json!([["noun"], ["x"]])).collect();
+            (id, serde_json::json!([[word], ["こと"], common, s]))
+        };
+        let mut found = vec![e(1, "古都", 1, 1), e(2, "事", 1, 9), e(3, "琴", 1, 3), e(4, "", 0, 4)];
+        kana_order(&mut found);
+        assert_eq!(found.iter().map(|f| f.0).collect::<Vec<_>>(), vec![2, 3, 1, 4]);
+    }
     use serde_json::json;
 
     fn texts(tokens: &[Token]) -> Vec<(&str, bool)> {
