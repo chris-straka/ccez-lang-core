@@ -10,6 +10,8 @@
 //! - [`ai`]: the AI providers (Muse by default), the shared prompts and a
 //!   streaming client (`net`); [`correction`]: ccez-llm's corrections.
 //! - [`sense`]: which dictionary meaning a translation uses.
+//! - [`fsrs`]: when a learning word comes back (FSRS), one schedule for
+//!   the screen words and what the owner watches.
 //!
 //! Features: `net` (default) for HTTP, `ja` for lindera, `uniffi` for
 //! UniFFI derives on the records.
@@ -17,6 +19,7 @@
 pub mod ai;
 pub mod correction;
 pub mod dict;
+pub mod fsrs;
 mod error;
 pub mod romaja;
 pub mod sense;

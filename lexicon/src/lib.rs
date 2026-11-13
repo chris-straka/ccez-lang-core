@@ -328,7 +328,8 @@ pub fn references(meaning: &str) -> Vec<String> {
         for (i, w) in words.iter().enumerate() {
             let lower = w.to_lowercase();
             let points = match lower.as_str() {
-                "of" => i > 0 && POINTERS.contains(&words[i - 1].to_lowercase().trim_matches(',')),
+                // "indicative/subjunctive of porter": either half names the form.
+                "of" => i > 0 && words[i - 1].to_lowercase().trim_matches(',').split('/').any(|p| POINTERS.contains(&p)),
                 "for" => i > 0 && matches!(words[i - 1].to_lowercase().as_str(), "short" | "abbreviation" | "contraction"),
                 "see" | "cf." | "compare" => i == 0,
                 _ => false,
@@ -456,6 +457,13 @@ mod wasm {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_slashed_form_name_still_points_at_its_word() {
+        let m = "third-person plural present indicative/subjunctive of porter";
+        assert_eq!(references(m), vec!["porter".to_string()]);
+        assert_eq!(only_points_at(m).as_deref(), Some("porter"));
+    }
+
     #[test]
     fn a_form_brings_its_words_meanings() {
         let attachee = serde_json::json!(["", [["noun", "f", ["feminine singular of attaché"]]], []]);
