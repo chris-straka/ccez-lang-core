@@ -112,7 +112,9 @@ fn recall_s(d: f64, s: f64, r: f64, g: f64) -> f64 {
     s * (1.0 + W[8].exp() * (11.0 - d) * s.powf(-W[9]) * ((W[10] * (1.0 - r)).exp() - 1.0) * easy)
 }
 fn forget_s(d: f64, s: f64, r: f64) -> f64 {
-    (W[11] * d.powf(-W[12]) * ((s + 1.0).powf(W[13]) - 1.0) * (W[14] * (1.0 - r)).exp()).min(s)
+    // FSRS-5's cap: no higher than the same-day step down from S.
+    let long = W[11] * d.powf(-W[12]) * ((s + 1.0).powf(W[13]) - 1.0) * (W[14] * (1.0 - r)).exp();
+    long.min(s / (W[17] * W[18]).exp())
 }
 /// Answered again within a day (learning steps).
 fn short_s(s: f64, g: f64) -> f64 {
@@ -143,8 +145,18 @@ impl Card {
                 };
             }
             State::Learning | State::Relearning => {
-                self.s = short_s(self.s.max(0.01), r);
-                self.d = next_d(self.d, r);
+                // Within a day: the short-term step. After a longer gap
+                // (watching leaves days between passes) the usual recall
+                // and lapse formulas, as FSRS-5 does (review, 2026-11-13).
+                let elapsed = now.saturating_sub(self.last) as f64 / DAY as f64;
+                let old_d = self.d;
+                self.s = if elapsed < 1.0 {
+                    short_s(self.s.max(0.01), r)
+                } else {
+                    let rec = recall(elapsed, self.s);
+                    if g == Grade::Again { forget_s(old_d, self.s, rec) } else { recall_s(old_d, self.s, rec, r) }
+                };
+                self.d = next_d(old_d, r);
                 (self.state, self.due) = match g {
                     Grade::Again => (self.state, now + RELEARN),
                     _ => (State::Review, now + interval(self.s)),
@@ -153,16 +165,20 @@ impl Card {
             State::Review => {
                 let elapsed = now.saturating_sub(self.last) as f64 / DAY as f64;
                 let rec = recall(elapsed, self.s);
-                self.d = next_d(self.d, r);
+                // Stability from the difficulty as it was, then the new
+                // difficulty (FSRS-5's order; the other way round made a
+                // lapse's stability too low and Easy's too long).
+                let old_d = self.d;
                 if g == Grade::Again {
-                    self.s = forget_s(self.d, self.s, rec);
+                    self.s = forget_s(old_d, self.s, rec);
                     self.lapses += 1;
                     self.state = State::Relearning;
                     self.due = now + RELEARN;
                 } else {
-                    self.s = if elapsed < 1.0 { short_s(self.s, r) } else { recall_s(self.d, self.s, rec, r) };
+                    self.s = if elapsed < 1.0 { short_s(self.s, r) } else { recall_s(old_d, self.s, rec, r) };
                     self.due = now + interval(self.s);
                 }
+                self.d = next_d(old_d, r);
             }
         }
         self.reps += 1;
@@ -262,6 +278,34 @@ mod tests {
         slipped.answer(Grade::Good, due + RELEARN);
         steady.answer(Grade::Good, due + RELEARN);
         assert!(slipped.due < steady.due, "a lapse shortens the next wait");
+    }
+
+    #[test]
+    fn stability_uses_the_difficulty_before_the_answer() {
+        // A card in review, a lapse: stability from the old difficulty.
+        let mut c = Card::default();
+        c.answer(Grade::Good, 0);
+        c.answer(Grade::Good, LEARN_STEP);
+        let (d, s, last) = (c.d, c.s, c.last);
+        let now = last + 10 * DAY;
+        let rec = recall(10.0, s);
+        c.answer(Grade::Again, now);
+        assert!((c.s - forget_s(d, s, rec)).abs() < 1e-9);
+        assert!((c.d - next_d(d, 1.0)).abs() < 1e-9);
+        assert!(c.s <= s / (W[17] * W[18]).exp() + 1e-9);
+    }
+
+    #[test]
+    fn a_learning_word_seen_again_weeks_later_grows_like_a_review() {
+        // Good once, then a pass two weeks later (watching): the recall
+        // formula, which rewards remembering after a long gap.
+        let mut c = Card::default();
+        c.answer(Grade::Good, 0);
+        assert_eq!(c.state, State::Learning);
+        let (d, s) = (c.d, c.s);
+        c.answer(Grade::Good, 14 * DAY);
+        assert!((c.s - recall_s(d, s, recall(14.0, s), 3.0)).abs() < 1e-9);
+        assert!(c.s > short_s(s, 3.0));
     }
 
     #[test]
