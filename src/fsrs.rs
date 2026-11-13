@@ -208,12 +208,14 @@ impl Card {
 /// up (a miss, Again), else it went by on screen untapped (a pass, Good).
 /// A pass counts only when the word is due (never answered, or its time
 /// has come), so seeing a word often doesn't push it off for months; a
-/// miss counts unless the word was answered in the last [RELEARN] (one
-/// lookup, not every tap). The new card, or None: nothing changes.
+/// miss counts unless the last answer was a miss in the last [RELEARN]
+/// (one lookup, not every tap; a lookup right after a pass still counts).
+/// The new card, or None: nothing changes.
 pub fn watched(card: Option<Card>, tapped: bool, at: u64) -> Option<Card> {
     let mut c = card.unwrap_or_default();
     if tapped {
-        if card.is_some() && c.at + RELEARN > at {
+        let just_missed = c.due == c.last + RELEARN && c.last + RELEARN > at;
+        if card.is_some() && just_missed {
             return None;
         }
         c.answer(Grade::Again, at);
@@ -293,5 +295,8 @@ mod tests {
         assert_eq!(watched(Some(missed), true, at + 60), None);
         // A word never answered, looked up: Again.
         assert_eq!(watched(None, true, 50).unwrap().due, 50 + RELEARN);
+        // Gone by, then looked up a moment later: the lookup still counts.
+        let passed = watched(None, false, 100).unwrap();
+        assert_eq!(watched(Some(passed), true, 101).unwrap().due, 101 + RELEARN);
     }
 }
