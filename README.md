@@ -49,4 +49,12 @@ derives on the records, for an app that hands them to Kotlin).
 Fixtures and examples are French, Japanese and Chinese. Android:
 `cargo ndk -t arm64-v8a --platform 26 build --release`.
 
+## Later
+
+ccez-llm (`scripts/dict-build.ts`, binary `.dict.gz` packs) and
+ccez-lang (`scripts/dict.ts`, the `.tsv.gz` lines this crate reads)
+still build dictionaries in two formats from the same sources (kaikki,
+JMdict; both download into `~/.cache/ccez-dict`). A candidate to merge
+into one pipeline and one pack format.
+
 MIT (LICENSE). Data credits: CREDITS.md.
