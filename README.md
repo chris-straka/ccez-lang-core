@@ -13,15 +13,19 @@ of ccez-tube's core; nothing in it touches YouTube.
 - **Statuses** (`status`): Learning / Known / New for every word, kept
   on the device and synced with ccez-words (the owner's server; its
   address is the app's setting). Newest change wins per word.
-- **AI** (`ai`, `correction`): the providers (Muse by default, the
-  learner's own key), the prompts the apps share, a streaming
-  OpenAI-compatible client, and ccez-llm's corrections (a correction
-  block and a word diff).
+- **AI** (`ai`, `correction`): one small streaming client for an
+  OpenAI-style `chat/completions` server (DeepSeek's `deepseek-flash` by
+  default; the address and model are the app's settings, so another
+  model is a settings change), the prompts the apps share, and
+  ccez-llm's corrections (a correction block and a word diff). Two
+  modes: `Quick` (corrections, glosses, tips, translation: thinking
+  off) and `Ask` (a chat: DeepSeek's lowest thinking, and its own web
+  search and link reading, with what it looked up in the reply).
 
 ## Use
 
     [dependencies]
-    ccez-lang-core = { git = "https://github.com/chris-straka/ccez-lang-core", tag = "v0.1.0" }
+    ccez-lang-core = { git = "https://github.com/chris-straka/ccez-lang-core", tag = "v0.2.0" }
 
 Features: `net` (default: sync and the AI client, over rustls),
 `ja` (Japanese words and furigana with lindera; IPAdic's files are read
@@ -37,9 +41,10 @@ derives on the records, for an app that hands them to Kotlin).
     statuses.set("fr", "maison", Status::Learning);
     let came = statuses.sync(server, "ccez-keys:phone").await?;
 
+    let ai = ai::Ai::new(url_setting, model_setting, key);    // blank: DeepSeek
     let m = correction::correction_messages("fr", typed, "en", Some(replying_to));
-    let answer = ai::ask(p.url, key, p.model, &m, Some("minimal"), |so_far| {}).await?;
-    let fix = correction::parse_correction(typed, &answer);   // text, why, diff
+    let reply = ai::chat(&ai, &m, ai::Mode::Quick, |_| {}).await?;
+    let fix = correction::parse_correction(typed, &reply.text);   // text, why, diff
 
 ## Tests
 

@@ -1,57 +1,44 @@
-//! The learner's AI (Muse by default, their own key): the providers,
-//! the prompts the apps share, and an OpenAI-compatible `chat/completions`
-//! client that streams the answer. The prompts are ccez-llm's annotation
-//! prompts (`src/lib/reading.ts`) as ccez-tube ported them, plus the
-//! line explanation from ccez-lang (`src/core/ai/prompts.ts`).
+//! The learner's AI: one small client for an OpenAI-style
+//! `chat/completions` server, streamed, and the prompts the apps share.
+//! DeepSeek by default (owner, 2026-11-16); the server's address and
+//! model are settings ([`Ai`]), so another model is a settings change.
+//! The prompts are ccez-llm's annotation prompts (`src/lib/reading.ts`) as
+//! ccez-tube ported them, plus the line explanation from ccez-lang
+//! (`src/core/ai/prompts.ts`).
 
-/// One AI service. `thinking` is the provider's own levels, as ccez-llm
-/// sends them; the first `default_thinking` is used when the app has no
-/// choice saved.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Provider {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub url: &'static str,
-    pub model: &'static str,
-    pub key_hint: &'static str,
-    pub thinking: &'static [&'static str],
-    pub default_thinking: Option<&'static str>,
+/// DeepSeek's API (api-docs.deepseek.com), the default server.
+pub const DEFAULT_URL: &str = "https://api.deepseek.com";
+/// DeepSeek V4.1 Flash. `deepseek-v4-flash` is a retired alias.
+pub const DEFAULT_MODEL: &str = "deepseek-flash";
+
+/// Where the AI is and the key for it. The key comes in with each call
+/// and is never logged or kept here. An empty key sends no
+/// Authorization: a hub that adds the owner's key (ccez-words) needs none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ai {
+    pub url: String,
+    pub model: String,
+    pub key: String,
 }
 
-/// Muse first: the default.
-pub const PROVIDERS: &[Provider] = &[
-    Provider {
-        id: "muse",
-        label: "Muse",
-        url: "https://api.meta.ai/v1",
-        model: "muse-spark-1.3-contributor",
-        key_hint: "Meta Model API key",
-        thinking: &["minimal", "low", "medium", "high", "xhigh"],
-        default_thinking: Some("medium"),
-    },
-    Provider {
-        id: "deepseek",
-        label: "DeepSeek",
-        url: "https://api.deepseek.com",
-        model: "deepseek-flash",
-        key_hint: "Starts with sk-",
-        thinking: &["off", "high", "max"],
-        default_thinking: Some("high"),
-    },
-    Provider {
-        id: "zen",
-        label: "OpenCode Zen",
-        url: "https://opencode.ai/zen/v1",
-        model: "big-pickle",
-        key_hint: "Zen key from opencode.ai/auth",
-        thinking: &[],
-        default_thinking: None,
-    },
-    Provider { id: "custom", label: "Your own server", url: "", model: "", key_hint: "If it needs one", thinking: &[], default_thinking: None },
-];
+impl Ai {
+    /// DeepSeek with `key`; a blank url or model takes the default.
+    pub fn new(url: &str, model: &str, key: &str) -> Self {
+        let pick = |v: &str, d: &str| if v.trim().is_empty() { d.to_string() } else { v.trim().to_string() };
+        Ai { url: pick(url, DEFAULT_URL).trim_end_matches('/').to_string(), model: pick(model, DEFAULT_MODEL), key: key.trim().to_string() }
+    }
+}
 
-pub fn provider(id: &str) -> Option<&'static Provider> {
-    PROVIDERS.iter().find(|p| p.id == id)
+/// What a call is for, which sets how hard the model thinks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum Mode {
+    /// Corrections, glosses, tips, translation: thinking off, no tools,
+    /// so the answer comes at once.
+    Quick,
+    /// An open chat: light thinking (DeepSeek's lowest effort) and
+    /// DeepSeek's own web search and link reading, which it runs itself.
+    Ask,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +46,9 @@ pub fn provider(id: &str) -> Option<&'static Provider> {
 pub struct Message {
     pub role: String,
     pub content: String,
+    /// An earlier answer's own fields to send back with it (its thinking
+    /// and the web lookups, JSON from [`Reply::carry`]); None otherwise.
+    pub carry: Option<String>,
 }
 
 /// One earlier exchange in a thread: what the learner wrote, the answer.
@@ -70,7 +60,41 @@ pub struct Turn {
 }
 
 pub(crate) fn msg(role: &str, content: String) -> Message {
-    Message { role: role.into(), content }
+    Message { role: role.into(), content, carry: None }
+}
+
+/// A page the model looked at: a search result, or a link it read.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct Source {
+    pub url: String,
+    pub title: String,
+    /// The site's name as DeepSeek gives it, else the host.
+    pub site: String,
+    /// The site's icon, when DeepSeek gives one.
+    pub icon: String,
+}
+
+/// An answer, with what the model looked up on the way (Ask only).
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct Reply {
+    pub text: String,
+    /// Each search it ran, its queries joined with " · ".
+    pub searches: Vec<String>,
+    /// The pages it found or read, each once, in the order they came.
+    pub sources: Vec<Source>,
+    /// What to send back with this answer in the next turn (JSON), if any.
+    pub carry: Option<String>,
+}
+
+/// What the answer is doing while it comes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// The whole answer so far.
+    Text(String),
+    /// What it's looking up now, in a few words ("Searching: x", "Reading y").
+    Looking(String),
 }
 
 /// ccez-llm's word budgets: the equivalent's floor, a note, a question.
@@ -192,106 +216,304 @@ pub(crate) fn take_events(buf: &mut Vec<u8>) -> Vec<String> {
     out
 }
 
-/// The request body: the messages, streamed, with the provider's own
-/// thinking switch (Muse's `reasoning_effort`, which has no "off";
-/// DeepSeek's thinking on or off).
-pub fn request_body(base_url: &str, model: &str, messages: &[Message], thinking: Option<&str>) -> serde_json::Value {
+/// DeepSeek's server-side web tools (guides/web_tools): it searches and
+/// reads links itself; the client runs nothing. They can't be combined
+/// with tools of our own.
+fn web_tools() -> serde_json::Value {
+    serde_json::json!([{"type": "deepseek_web_search"}, {"type": "deepseek_read_url"}])
+}
+
+/// The request body. Thinking is always sent: DeepSeek thinks hard when
+/// it's left out. Quick: off. Ask: on at the lowest effort, with the web
+/// tools unless `tools` is false (a server that refused them).
+pub fn request_body(model: &str, messages: &[Message], mode: Mode, tools: bool) -> serde_json::Value {
     use serde_json::json;
-    let mut body = json!({
-        "model": model,
-        "stream": true,
-        "messages": messages.iter().map(|m| json!({"role": m.role, "content": m.content})).collect::<Vec<_>>(),
-    });
-    match (thinking, base_url.contains("api.meta.ai"), base_url.contains("deepseek")) {
-        (Some(level), true, _) => body["reasoning_effort"] = json!(level),
-        (Some("off"), _, true) => body["thinking"] = json!({"type": "disabled"}),
-        (Some(level @ ("high" | "max")), _, true) => {
-            body["thinking"] = json!({"type": "enabled"});
-            body["reasoning_effort"] = json!(level);
+    let ask = mode == Mode::Ask;
+    let wire: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            let mut o = json!({"role": m.role, "content": m.content});
+            if m.role == "assistant" && ask {
+                // An answer's thinking and lookups go back as they came.
+                let carried = m.carry.as_deref().and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok());
+                if let Some(serde_json::Value::Object(fields)) = carried {
+                    for (k, v) in fields {
+                        o[k] = v;
+                    }
+                }
+                if o.get("reasoning_content").is_none() {
+                    o["reasoning_content"] = json!("");
+                }
+            }
+            o
+        })
+        .collect();
+    let mut body = json!({"model": model, "stream": true, "messages": wire});
+    if ask {
+        body["thinking"] = json!({"type": "enabled"});
+        body["reasoning_effort"] = json!("low");
+        if tools {
+            body["tools"] = web_tools();
         }
-        _ => {}
+    } else {
+        body["thinking"] = json!({"type": "disabled"});
     }
     body
 }
 
 /// An error answer in words.
 #[cfg_attr(not(feature = "net"), allow(dead_code))]
-fn ai_error(status: u16, detail: &str) -> String {
+pub(crate) fn ai_error(status: u16, detail: &str) -> String {
     let said = serde_json::from_str::<serde_json::Value>(detail).ok().and_then(|v| v.pointer("/error/message").and_then(|m| m.as_str()).map(str::to_string));
     match status {
-        401 | 403 => "The AI refused the key. Check it in settings.".into(),
-        429 => "The AI is busy or the key's limit is reached. Try again in a minute.".into(),
+        401 | 403 => "The AI refused the key.".into(),
+        402 => "DeepSeek's balance is used up: top it up at platform.deepseek.com.".into(),
+        429 => "The AI is busy. Try again in a minute.".into(),
+        503 if said.is_none() && detail.contains("no DeepSeek key") => "No DeepSeek key on the Mac yet.".into(),
         _ => format!("The AI answered {status}{}", said.map(|s| format!(": {s}")).unwrap_or_default()),
     }
 }
 
-/// Asks `model` at `base_url` (OpenAI-compatible) with the learner's
-/// `key`, calling `on_text` with the whole answer so far as each piece
-/// arrives. Returns the whole answer. Needs a Tokio runtime.
+/// The host of `url`, for a source with no site name.
+fn host(url: &str) -> String {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let h = rest.split(['/', '?', '#']).next().unwrap_or("");
+    h.strip_prefix("www.").unwrap_or(h).to_string()
+}
+
+/// One web call's action in a few words, for "what it's looking up".
+fn looking(call: &serde_json::Value) -> Option<String> {
+    let a = call.get("action")?;
+    match a.get("type")?.as_str()? {
+        "search" => {
+            let qs: Vec<&str> = a.get("queries")?.as_array()?.iter().filter_map(|q| q.as_str()).collect();
+            (!qs.is_empty()).then(|| format!("Searching: {}", qs.join(" · ")))
+        }
+        "open_page" | "read_link" => a.get("url")?.as_str().map(|u| format!("Reading {}", host(u))),
+        "find_in_page" => a.get("pattern")?.as_str().map(|p| format!("Finding “{p}”")),
+        _ => None,
+    }
+}
+
+/// The searches and pages in DeepSeek's `server_tool_calls`, added to
+/// `reply` (each page once).
+fn take_lookups(steps: &serde_json::Value, reply: &mut Reply) {
+    let add = |reply: &mut Reply, s: &serde_json::Value| {
+        let Some(url) = s.get("url").and_then(|u| u.as_str()).filter(|u| !u.is_empty()) else { return };
+        if reply.sources.iter().any(|x| x.url == url) {
+            return;
+        }
+        let text = |k: &str| s.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let site = Some(text("site_name")).filter(|t| !t.is_empty()).unwrap_or_else(|| host(url));
+        let title = Some(text("title")).filter(|t| !t.is_empty()).unwrap_or_else(|| url.to_string());
+        reply.sources.push(Source { url: url.to_string(), title, site, icon: text("site_icon") });
+    };
+    for step in steps.as_array().into_iter().flatten() {
+        for call in step.get("calls").and_then(|c| c.as_array()).into_iter().flatten() {
+            if let Some(a) = call.get("action").filter(|a| a.get("type").and_then(|t| t.as_str()) == Some("search")) {
+                let qs: Vec<&str> = a.get("queries").and_then(|q| q.as_array()).into_iter().flatten().filter_map(|q| q.as_str()).collect();
+                if !qs.is_empty() {
+                    reply.searches.push(qs.join(" · "));
+                }
+            }
+            for s in call.get("sources").and_then(|s| s.as_array()).into_iter().flatten() {
+                add(reply, s);
+            }
+            if let Some(page) = call.get("page") {
+                add(reply, page);
+            }
+        }
+    }
+}
+
+/// Reads one streamed chunk into `reply`; Err when the server reports a
+/// failure mid-answer (DeepSeek: `error` with no choices, no [DONE]).
+#[cfg_attr(not(feature = "net"), allow(dead_code))]
+pub(crate) fn take_chunk(v: &serde_json::Value, reply: &mut Reply, thinking: &mut String, steps: &mut Option<serde_json::Value>, on: &mut dyn FnMut(Event)) -> Result<(), String> {
+    if let Some(e) = v.get("error").filter(|e| !e.is_null()) {
+        return Err(e.get("message").and_then(|m| m.as_str()).unwrap_or("the answer broke off").to_string());
+    }
+    let Some(choice) = v.pointer("/choices/0") else { return Ok(()) };
+    if let Some(call) = choice.get("server_tool_event").filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("call_started")).and_then(|e| e.get("call"))
+        && let Some(line) = looking(call)
+    {
+        on(Event::Looking(line));
+    }
+    let Some(delta) = choice.get("delta") else { return Ok(()) };
+    if let Some(r) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
+        thinking.push_str(r);
+    }
+    if let Some(piece) = delta.get("content").and_then(|p| p.as_str())
+        && !piece.is_empty()
+    {
+        reply.text.push_str(piece);
+        on(Event::Text(reply.text.clone()));
+    }
+    if let Some(calls) = delta.get("server_tool_calls").filter(|c| c.is_array()) {
+        take_lookups(calls, reply);
+        *steps = Some(calls.clone());
+    }
+    if let Some(notes) = delta.get("annotations").and_then(|a| a.as_array()) {
+        // Pages cited but not among the lookups (never expected; kept so
+        // nothing cited goes unshown).
+        for n in notes {
+            if let Some(c) = n.get("url_citation") {
+                take_lookups(&serde_json::json!([{"calls": [{"page": c}]}]), reply);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Asks the AI, `on` hearing the answer as it grows and what it's
+/// looking up. Ask mode falls back to no web tools once if the server
+/// refuses them (400/422). Needs a Tokio runtime.
 #[cfg(feature = "net")]
-pub async fn ask(
-    base_url: &str,
-    key: &str,
-    model: &str,
-    messages: &[Message],
-    thinking: Option<&str>,
-    mut on_text: impl FnMut(&str) + Send,
-) -> crate::Result<String> {
+pub async fn chat(ai: &Ai, messages: &[Message], mode: Mode, mut on: impl FnMut(Event) + Send) -> crate::Result<Reply> {
+    match chat_once(ai, messages, mode, true, &mut on).await {
+        Err(Failed(_, true)) if mode == Mode::Ask => chat_once(ai, messages, mode, false, &mut on).await.map_err(|e| e.0),
+        r => r.map_err(|e| e.0),
+    }
+}
+
+/// An error, and whether the server refused the request's shape.
+#[cfg(feature = "net")]
+struct Failed(crate::LangError, bool);
+
+#[cfg(feature = "net")]
+async fn chat_once(ai: &Ai, messages: &[Message], mode: Mode, tools: bool, on: &mut (dyn FnMut(Event) + Send)) -> Result<Reply, Failed> {
     use crate::LangError;
-    let body = request_body(base_url, model, messages, thinking);
+    let body = request_body(&ai.model, messages, mode, tools);
     let http = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(120))
+        // Web lookups take a while before the first word.
+        .timeout(std::time::Duration::from_secs(if mode == Mode::Ask { 240 } else { 90 }))
         .build()
         .unwrap_or_default();
     let mut req = http
-        .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
+        .post(format!("{}/chat/completions", ai.url.trim_end_matches('/')))
         .header("Content-Type", "application/json")
         .header("Accept", "text/event-stream")
         .body(body.to_string());
-    if !key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {key}"));
+    if !ai.key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", ai.key));
     }
-    let net = |e: reqwest::Error| if e.is_timeout() { LangError::Timeout } else { LangError::Network };
+    let net = |e: reqwest::Error| Failed(if e.is_timeout() { LangError::Timeout } else { LangError::Network }, false);
     let mut res = req.send().await.map_err(net)?;
     if !res.status().is_success() {
         let status = res.status().as_u16();
         let detail = res.text().await.unwrap_or_default();
-        return Err(LangError::Ai { reason: ai_error(status, &detail) });
+        return Err(Failed(LangError::Ai { reason: ai_error(status, &detail) }, tools && matches!(status, 400 | 422)));
     }
     let mut buf: Vec<u8> = Vec::new();
-    let mut answer = String::new();
+    let mut reply = Reply::default();
+    let mut thinking = String::new();
+    let mut steps = None;
+    let finish = |reply: &mut Reply, thinking: String, steps: Option<serde_json::Value>| {
+        if mode == Mode::Ask && (steps.is_some() || !thinking.is_empty()) {
+            let mut carry = serde_json::json!({"reasoning_content": thinking});
+            if let Some(s) = steps {
+                carry["server_tool_calls"] = s;
+            }
+            reply.carry = Some(carry.to_string());
+        }
+    };
     while let Some(chunk) = res.chunk().await.map_err(net)? {
         buf.extend_from_slice(&chunk);
         for data in take_events(&mut buf) {
             if data == "[DONE]" {
-                return Ok(answer);
+                finish(&mut reply, thinking, steps);
+                return Ok(reply);
             }
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else { continue };
-            if let Some(piece) = v.pointer("/choices/0/delta/content").and_then(|p| p.as_str())
-                && !piece.is_empty()
-            {
-                answer.push_str(piece);
-                on_text(&answer);
-            }
+            take_chunk(&v, &mut reply, &mut thinking, &mut steps, on).map_err(|reason| Failed(LangError::Ai { reason }, false))?;
         }
     }
-    Ok(answer)
+    finish(&mut reply, thinking, steps);
+    Ok(reply)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn m(role: &str, content: &str) -> Message {
+        msg(role, content.into())
+    }
+
     #[test]
-    fn muse_is_the_default_and_its_thinking_has_no_off() {
-        assert_eq!(PROVIDERS[0].id, "muse");
-        assert_eq!(PROVIDERS[0].model, "muse-spark-1.3-contributor");
-        assert!(!PROVIDERS[0].thinking.contains(&"off"));
-        let b = request_body(PROVIDERS[0].url, PROVIDERS[0].model, &[], Some("minimal"));
-        assert_eq!(b["reasoning_effort"], "minimal");
-        let d = request_body("https://api.deepseek.com", "deepseek-flash", &[], Some("off"));
-        assert_eq!(d["thinking"]["type"], "disabled");
+    fn deepseek_flash_is_the_default_and_blank_settings_take_it() {
+        let ai = Ai::new(" ", "", " sk-test-fake ");
+        assert_eq!(ai, Ai { url: "https://api.deepseek.com".into(), model: "deepseek-flash".into(), key: "sk-test-fake".into() });
+        assert_eq!(Ai::new("https://z.example:8448/ai/deepseek/", "other-model", "").url, "https://z.example:8448/ai/deepseek");
+    }
+
+    #[test]
+    fn quick_work_turns_thinking_off_and_offers_no_tools() {
+        let b = request_body("deepseek-flash", &[m("system", "s"), m("user", "u")], Mode::Quick, true);
+        assert_eq!(b["thinking"], serde_json::json!({"type": "disabled"}));
+        assert!(b.get("reasoning_effort").is_none() && b.get("tools").is_none());
+        assert_eq!(b["model"], "deepseek-flash");
+        assert_eq!(b["stream"], true);
+        assert_eq!(b["messages"][1], serde_json::json!({"role": "user", "content": "u"}));
+    }
+
+    #[test]
+    fn ask_thinks_lightly_with_the_web_tools_and_sends_answers_back_whole() {
+        let mut earlier = m("assistant", "A1");
+        earlier.carry = Some(r#"{"reasoning_content":"r","server_tool_calls":[{"index":0,"calls":[]}]}"#.into());
+        let b = request_body("deepseek-flash", &[m("user", "Q1"), earlier, m("assistant", "A2"), m("user", "Q3")], Mode::Ask, true);
+        assert_eq!(b["thinking"], serde_json::json!({"type": "enabled"}));
+        assert_eq!(b["reasoning_effort"], "low");
+        assert_eq!(b["tools"], serde_json::json!([{"type": "deepseek_web_search"}, {"type": "deepseek_read_url"}]));
+        assert_eq!(b["messages"][1]["reasoning_content"], "r");
+        assert_eq!(b["messages"][1]["server_tool_calls"][0]["index"], 0);
+        assert_eq!(b["messages"][2]["reasoning_content"], "");
+        assert!(b["messages"][0].get("reasoning_content").is_none());
+        assert!(request_body("deepseek-flash", &[], Mode::Ask, false).get("tools").is_none());
+    }
+
+    #[test]
+    fn errors_name_the_key_the_balance_and_the_wait() {
+        assert_eq!(ai_error(401, ""), "The AI refused the key.");
+        assert!(ai_error(402, "").contains("balance is used up"));
+        assert!(ai_error(429, "").contains("busy"));
+        assert_eq!(ai_error(400, r#"{"error":{"message":"bad"}}"#), "The AI answered 400: bad");
+    }
+
+    #[test]
+    fn a_stream_brings_text_lookups_and_what_to_send_back() {
+        let chunks = [
+            r#"{"choices":[{"index":0,"delta":{"reasoning_content":"hm"}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"server_tool_event":{"type":"call_started","step":0,"call":{"index":0,"type":"deepseek_web_search","kind":"deep_search","action":{"type":"search","queries":["argot 2026","verlan"]}}}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"server_tool_event":{"type":"call_started","step":0,"call":{"action":{"type":"read_link","url":"https://www.example.fr/a"}}}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"content":"Ça "}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"content":"va.","annotations":[{"type":"url_citation","url_citation":{"url":"https://cited.example/x","title":"Cited","start_index":0,"end_index":3}}],"server_tool_calls":[{"index":0,"reasoning_content":"hm","calls":[{"index":0,"type":"deepseek_web_search","kind":"deep_search","action":{"type":"search","queries":["argot 2026","verlan"]},"status":"completed","sources":[{"type":"url","url":"https://www.example.fr/a","title":"A","site_name":"Exemple","site_icon":"https://cdn.example/i.png"},{"type":"url","url":"https://b.example/b","title":"B"}]},{"index":1,"type":"deepseek_read_url","kind":"read_link","action":{"type":"read_link","url":"https://www.example.fr/a"},"status":"completed","page":{"url":"https://www.example.fr/a","title":"A"},"signature":"sig"}]}]},"finish_reason":"stop"}]}"#,
+        ];
+        let (mut reply, mut thinking, mut steps, mut seen) = (Reply::default(), String::new(), None, Vec::new());
+        for c in chunks {
+            let v: serde_json::Value = serde_json::from_str(c).unwrap();
+            take_chunk(&v, &mut reply, &mut thinking, &mut steps, &mut |e| seen.push(e)).unwrap();
+        }
+        assert_eq!(reply.text, "Ça va.");
+        assert_eq!(seen[0], Event::Looking("Searching: argot 2026 · verlan".into()));
+        assert_eq!(seen[1], Event::Looking("Reading example.fr".into()));
+        assert_eq!(seen.last(), Some(&Event::Text("Ça va.".into())));
+        assert_eq!(reply.searches, ["argot 2026 · verlan"]);
+        let urls: Vec<&str> = reply.sources.iter().map(|s| s.url.as_str()).collect();
+        assert_eq!(urls, ["https://www.example.fr/a", "https://b.example/b", "https://cited.example/x"]);
+        assert_eq!((reply.sources[0].site.as_str(), reply.sources[0].icon.as_str()), ("Exemple", "https://cdn.example/i.png"));
+        assert_eq!((reply.sources[1].site.as_str(), reply.sources[1].title.as_str()), ("b.example", "B"));
+        assert_eq!(reply.sources[2].title, "Cited");
+        assert_eq!(thinking, "hm");
+        assert_eq!(steps.unwrap()[0]["calls"][1]["signature"], "sig");
+    }
+
+    #[test]
+    fn a_failure_mid_answer_is_an_error_not_a_cut() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"choices":[],"error":{"message":"The model failed to generate a complete response."}}"#).unwrap();
+        let r = take_chunk(&v, &mut Reply::default(), &mut String::new(), &mut None, &mut |_| {});
+        assert_eq!(r, Err("The model failed to generate a complete response.".into()));
     }
 
     #[test]
